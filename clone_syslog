@@ -1,0 +1,62 @@
+when RULE_INIT {
+
+# Log debug locally to /var/log/ltm? 1=yes, 0=no
+set static::hsl_debug 0
+# Pool name to clone requests to
+set static::hsl_pool "clone_pl_syslog_601"
+
+}
+
+when CLIENT_ACCEPTED {
+
+# Check to see if all pool members are down
+# If all members of clone pool are down set exit_irule = 1
+if {[active_members $static::hsl_pool]==0}
+{
+    log "[IP::client_addr]:[TCP::client_port]: [virtual name] $static::hsl_pool down, not logging"
+    set exit_irule 1
+    return
+}
+else 
+{
+    set exit_irule 0
+}
+
+# Open a new HSL connection if one is not available
+set hsl [HSL::open -proto TCP -pool $static::hsl_pool]
+
+# Logging
+if {$static::hsl_debug}{log local0. "[IP::client_addr]:[TCP::client_port]: New hsl handle: $hsl"}
+}
+
+when HTTP_REQUEST {
+
+# If the HSL pool is down, return
+if {$exit_irule}
+{
+    return
+}
+
+# XFF needed because of SNAT. Add it here
+HTTP::header insert X-Forwarded-For [IP::client_addr]
+
+# Request with no payload, so send just the HTTP headers to the clone pool
+HSL::send $hsl "[HTTP::request]\n"
+
+# Logging
+if {$static::hsl_debug}{log local0. "[IP::client_addr]:[TCP::client_port]: Sending [HTTP::request]"}
+
+}
+
+when HTTP_REQUEST_DATA {
+
+# The parser does not allow HTTP::request in this event, but it works
+set request_cmd "HTTP::request"
+
+# Logging
+if {$static::hsl_debug}{log local0. "[IP::client_addr]:[TCP::client_port]: Collected [HTTP::payload length] bytes,\
+sending [expr {[string length [eval $request_cmd]] + [HTTP::payload length]}] bytes total"}
+
+HSL::send $hsl "[eval $request_cmd][HTTP::payload]\nf"
+
+}
